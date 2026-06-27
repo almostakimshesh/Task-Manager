@@ -3,14 +3,13 @@
  * Plugin Name:       Task Manager
  * Plugin URI:        https://example.com/plugins/the-basics/
  * Description:       Handle the basics with this plugin.
- * Version:           1.1.1
+ * Version:           1.1.2
  * Requires at least: 5.2
  * Requires PHP:      7.2
  * Author:            Al Mostakim
  * Author URI:        https://author.example.com/
  * License:           GPL v2 or later
  * License URI:       https://www.gnu.org/licenses/gpl-2.0.html
- * Update URI:        https://example.com/my-plugin/
  * Text Domain:       task-manager
  * Domain Path:       /languages
  */
@@ -26,8 +25,7 @@ if (!defined('ABSPATH')) {
 */
 
 add_action('admin_enqueue_scripts', function ($hook) {
-
-    if ($hook !== 'toplevel_page_task-manager') {
+    if ('toplevel_page_task-manager' !== $hook) {
         return;
     }
 
@@ -35,16 +33,16 @@ add_action('admin_enqueue_scripts', function ($hook) {
 
     wp_enqueue_style(
         'tm-style',
-        $base . 'assets/style.css',
+        $base . 'assets/css/style.css',
         [],
         '1.0.0'
     );
 
     wp_enqueue_script(
         'tm-script',
-        $base . 'assets/script.js',
+        $base . 'assets/js/script.js',
         [],
-        '1.0.0',
+        '1.0.1',
         true
     );
 });
@@ -60,10 +58,10 @@ add_action('init', 'tm_register_cpt');
 function tm_register_cpt()
 {
     register_post_type('tm_tasks', [
-        'label' => 'Tasks',
-        'public' => false,
-        'show_ui' => false,
-        'supports' => ['title']
+        'label'    => 'Tasks',
+        'public'   => false,
+        'show_ui'  => false,
+        'supports' => ['title'],
     ]);
 }
 
@@ -90,7 +88,7 @@ function tm_admin_menu()
 
 /*
 |--------------------------------------------------------------------------
-| Save Task
+| Save or Update Task
 |--------------------------------------------------------------------------
 */
 
@@ -101,34 +99,88 @@ function tm_handle_save()
     check_admin_referer('tm_save_task');
 
     if (!current_user_can('manage_options')) {
-        wp_die('Unauthorized');
+        wp_die(
+            esc_html__('You do not have permission to perform this action.', 'task-manager')
+        );
     }
 
-    $title  = sanitize_text_field($_POST['tm_title'] ?? '');
-    $status = sanitize_text_field($_POST['_tm_status'] ?? 'Pending');
+    $task_id = isset($_POST['tm_task_id'])
+        ? absint($_POST['tm_task_id'])
+        : 0;
 
-    if (empty($title)) {
-        wp_redirect(admin_url('admin.php?page=task-manager'));
+    $title = isset($_POST['tm_title'])
+        ? sanitize_text_field(wp_unslash($_POST['tm_title']))
+        : '';
+
+    $status = isset($_POST['_tm_status'])
+        ? sanitize_text_field(wp_unslash($_POST['_tm_status']))
+        : 'Pending';
+
+    $allowed_statuses = [
+        'Pending',
+        'Completed',
+    ];
+
+    if (!in_array($status, $allowed_statuses, true)) {
+        $status = 'Pending';
+    }
+
+    if ('' === $title) {
+        wp_safe_redirect(
+            admin_url('admin.php?page=task-manager&error=empty-title')
+        );
         exit;
     }
 
-    $task_id = wp_insert_post([
-        'post_type'   => 'tm_tasks',
-        'post_title'  => $title,
-        'post_status' => 'publish',
-    ], true);
+    if ($task_id > 0) {
+        $existing_task = get_post($task_id);
 
-    if (is_wp_error($task_id)) {
-        wp_die($task_id->get_error_message());
+        if (!$existing_task || 'tm_tasks' !== $existing_task->post_type) {
+            wp_safe_redirect(
+                admin_url('admin.php?page=task-manager&error=task-not-found')
+            );
+            exit;
+        }
+
+        $result = wp_update_post(
+            [
+                'ID'          => $task_id,
+                'post_title'  => $title,
+                'post_status' => 'publish',
+            ],
+            true
+        );
+
+        if (is_wp_error($result)) {
+            wp_die(esc_html($result->get_error_message()));
+        }
+
+        update_post_meta($task_id, '_tm_status', $status);
+
+        wp_safe_redirect(
+            admin_url('admin.php?page=task-manager&updated=1')
+        );
+        exit;
     }
 
-    update_post_meta(
-        $task_id,
-        '_tm_status',
-        $status
+    $task_id = wp_insert_post(
+        [
+            'post_type'   => 'tm_tasks',
+            'post_title'  => $title,
+            'post_status' => 'publish',
+        ],
+        true
     );
 
-    wp_redirect(admin_url('admin.php?page=task-manager&saved=1'));
+    if (is_wp_error($task_id)) {
+        wp_die(esc_html($task_id->get_error_message()));
+    }
+
+    update_post_meta($task_id, '_tm_status', $status);
+
+    wp_safe_redirect(
+        admin_url('admin.php?page=task-manager&saved=1')
+    );
     exit;
 }
 
@@ -145,139 +197,161 @@ function tm_render_admin_page()
         'post_status'    => 'publish',
         'posts_per_page' => -1,
         'orderby'        => 'ID',
-        'order'          => 'DESC'
+        'order'          => 'DESC',
     ]);
-?>
+    ?>
 
-<div class="wrap tm-wrap">
+    <div class="wrap tm-wrap">
+        <div class="tm-toolbar">
+            <h1 class="tm-title">Task Manager</h1>
 
-    <div class="tm-toolbar">
-        <h1 class="tm-title">Task Manager</h1>
+            <?php if (isset($_GET['saved'])) : ?>
+                <div class="notice notice-success is-dismissible">
+                    <p>Task saved successfully.</p>
+                </div>
+            <?php endif; ?>
 
-        <button type="button"
+            <?php if (isset($_GET['updated'])) : ?>
+                <div class="notice notice-success is-dismissible">
+                    <p>Task updated successfully.</p>
+                </div>
+            <?php endif; ?>
+
+            <?php if (isset($_GET['error'])) : ?>
+                <div class="notice notice-error is-dismissible">
+                    <p>Unable to save the task. Please check the submitted information.</p>
+                </div>
+            <?php endif; ?>
+
+            <button
+                type="button"
                 id="tm-add-btn"
-                class="tm-btn tm-btn-primary">
-            + Add New Task
-        </button>
-    </div>
-
-    <?php if (isset($_GET['saved'])) : ?>
-        <div class="notice notice-success is-dismissible">
-            <p>Task saved successfully.</p>
+                class="tm-btn tm-btn-primary"
+            >
+                + Add New Task
+            </button>
         </div>
-    <?php endif; ?>
-    <div class="tm-card">
-        <table class="tm-table">
-            <thead>
-                <tr>
-                    <th>#</th>
-                    <th>Title</th>
-                    <th>Status</th>
-                    <th>Actions</th>
-                </tr>
-            </thead>
-                <tbody id="tm-tbody">
-                <?php if (empty($tasks)) : ?>
+
+        <div class="tm-card">
+            <table class="tm-table">
+                <thead>
                     <tr>
-                        <td colspan="3" class="tm-empty">
-                            No tasks yet. Click "Add New Task" to create one.
-                        </td>
+                        <th>#</th>
+                        <th>Title</th>
+                        <th>Status</th>
+                        <th>Actions</th>
                     </tr>
-                <?php else : ?>
-                <?php foreach ($tasks as $index => $task) :
-                        $status = get_post_meta(
-                            $task->ID,
-                            '_tm_status',
-                            true
-                        );
-                    ?>
+                </thead>
+                <tbody id="tm-tbody">
+                    <?php if (empty($tasks)) : ?>
                         <tr>
-                            <td><?php echo esc_html($index + 1); ?></td>
-                            <td>
-                                <?php echo esc_html($task->post_title); ?>
-                            </td>
-                            <td>
-                                <?php echo esc_html(
-                                    $status ? $status : 'Pending'
-                                ); ?>
+                            <td colspan="4" class="tm-empty">
+                                No tasks yet. Click "Add New Task" to create one.
                             </td>
                         </tr>
-                    <?php endforeach; ?>
-                <?php endif; ?>
-            </tbody>
-        </table>
-    </div>
+                    <?php else : ?>
+                        <?php foreach ($tasks as $index => $task) : ?>
+                            <?php
+                            $status = get_post_meta($task->ID, '_tm_status', true);
+                            $status = $status ? $status : 'Pending';
+                            ?>
+                            <tr>
+                                <td><?php echo esc_html($index + 1); ?></td>
+                                <td><?php echo esc_html($task->post_title); ?></td>
+                                <td><?php echo esc_html($status); ?></td>
+                                <td>
+                                    <button
+                                        type="button"
+                                        class="tm-btn tm-btn-primary tm-edit-btn"
+                                        data-id="<?php echo esc_attr($task->ID); ?>"
+                                        data-title="<?php echo esc_attr($task->post_title); ?>"
+                                        data-status="<?php echo esc_attr($status); ?>"
+                                    >
+                                        Edit
+                                    </button>
 
-    <!-- Modal -->
-
-    <div id="tm-modal" class="tm-modal">
-        <div class="tm-modal-backdrop" data-close></div>
-        <div class="tm-modal-dialog">
-            <div class="tm-modal-header">
-                <h2 id="tm-modal-title">
-                    Add New Task
-                </h2>
-                <button type="button"class="tm-modal-close" data-close>&times;</button>
-            </div>
-            <form method="POST" action="<?php echo esc_url(admin_url('admin-post.php')); ?>"id="tm-form" class="tm-form">
-                <?php wp_nonce_field('tm_save_task'); ?>
-                <input type="hidden" name="action" value="tm_save_task">
-                <label class="tm-label">Title </label>
-                <input type="text" name="tm_title" id="tm-title" class="tm-input" maxlength="120" required> 
-                <label class="tm-label">Status</label> 
-                <select name="_tm_status" id="tm-status" class="tm-input">
-                    <option value="Pending">Pending</option>
-                    <option value="Completed">Completed</option>
-                </select> 
-                <div class="tm-modal-footer">
-                    <button type="button" class="tm-btn" data-close>Cancel</button> 
-                    <button type="submit" class="tm-btn tm-btn-primary">Save Task</button>
-                </div>
-            </form>
+                                    <button
+                                        type="button"
+                                        class="tm-btn tm-btn-danger tm-delete-btn"
+                                        data-id="<?php echo esc_attr($task->ID); ?>"
+                                        data-title="<?php echo esc_attr($task->post_title); ?>"
+                                    >
+                                        Delete
+                                    </button>
+                                </td>
+                            </tr>
+                        <?php endforeach; ?>
+                    <?php endif; ?>
+                </tbody>
+            </table>
         </div>
-    </div>
-</div>
 
-   <div id="tm-modal" class="tm-modal" aria-hidden="true">
+        <div id="tm-modal" class="tm-modal" aria-hidden="true">
             <div class="tm-modal-backdrop" data-close></div>
-            <div class="tm-modal-dialog" role="dialog" aria-modal="true">
+
+            <div
+                class="tm-modal-dialog"
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby="tm-modal-title"
+            >
                 <div class="tm-modal-header">
                     <h2 id="tm-modal-title">Add New Task</h2>
-                    <button class="tm-modal-close" data-close>&times;</button>
+
+                    <button
+                        type="button"
+                        class="tm-modal-close"
+                        data-close
+                        aria-label="Close"
+                    >
+                        &times;
+                    </button>
                 </div>
-                <form id="tm-form" class="tm-form">
-                    <input type="hidden" id="tm-task-id" />
-                    <label class="tm-label">Title
-                        <input type="text" id="tm-title" class="tm-input" required maxlength="120" />
-                    </label>
-                    <label class="tm-label">Description
-                        <textarea id="tm-desc" class="tm-input" rows="3" maxlength="500"></textarea>
-                    </label>
-                    <div class="tm-grid-2">
-                        <label class="tm-label">Priority
-                            <select id="tm-priority" class="tm-input">
-                                <option value="Low">Low</option>
-                                <option value="Medium" selected>Medium</option>
-                                <option value="High">High</option>
-                            </select>
-                        </label>
-                        <label class="tm-label">Status
-                            <select id="tm-status" class="tm-input">
-                                <option value="Pending" selected>Pending</option>
-                                <option value="In Progress">In Progress</option>
-                                <option value="Completed">Completed</option>
-                            </select>
-                        </label>
-                    </div>
-                    <label class="tm-label">Due Date
-                        <input type="date" id="tm-due" class="tm-input" />
-                    </label>
+
+                <form
+                    method="post"
+                    action="<?php echo esc_url(admin_url('admin-post.php')); ?>"
+                    id="tm-form"
+                    class="tm-form"
+                >
+                    <?php wp_nonce_field('tm_save_task'); ?>
+
+                    <input type="hidden" name="action" value="tm_save_task">
+                    <input type="hidden" name="tm_task_id" id="tm-task-id" value="">
+
+                    <label class="tm-label" for="tm-title">Title</label>
+                    <input
+                        type="text"
+                        name="tm_title"
+                        id="tm-title"
+                        class="tm-input"
+                        maxlength="120"
+                        required
+                    >
+
+                    <label class="tm-label" for="tm-status">Status</label>
+                    <select name="_tm_status" id="tm-status" class="tm-input">
+                        <option value="Pending">Pending</option>
+                        <option value="Completed">Completed</option>
+                    </select>
+
                     <div class="tm-modal-footer">
-                        <button type="button" class="tm-btn" data-close>Cancel</button>
-                        <button type="submit" class="tm-btn tm-btn-primary" id="tm-save-btn">Save Task</button>
+                        <button type="button" class="tm-btn" data-close>
+                            Cancel
+                        </button>
+
+                        <button
+                            type="submit"
+                            id="tm-submit-btn"
+                            class="tm-btn tm-btn-primary"
+                        >
+                            Save Task
+                        </button>
                     </div>
                 </form>
             </div>
         </div>
-<?php
+    </div>
+
+    <?php
 }

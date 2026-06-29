@@ -1,7 +1,7 @@
 <?php
 /*
  * Plugin Name:       Task Manager
- * Plugin URI:        https://example.com/plugins/the-basics/
+ * Plugin URI:        https://example.com/plugins/
  * Description:       Handle the basics with this plugin.
  * Version:           1.1.2
  * Requires at least: 5.2
@@ -155,6 +155,20 @@ function tm_handle_save()
             wp_die(esc_html($result->get_error_message()));
         }
 
+        /*
+        * Keep the task active when updating.
+        */
+        update_post_meta($task_id, 'tm_status', 'active');
+
+        /*
+        * Save Pending/Completed status.
+        */
+        update_post_meta($task_id, '_tm_status', $status);
+
+        if (is_wp_error($result)) {
+            wp_die(esc_html($result->get_error_message()));
+        }
+
         update_post_meta($task_id, '_tm_status', $status);
 
         wp_safe_redirect(
@@ -186,6 +200,63 @@ function tm_handle_save()
 
 /*
 |--------------------------------------------------------------------------
+| Delete Task
+|--------------------------------------------------------------------------
+*/
+
+add_action('admin_post_tm_delete_task', 'tm_handle_delete_task');
+
+function tm_handle_delete_task()
+{
+    if (!current_user_can('manage_options')) {
+        wp_die(
+            esc_html__(
+                'You do not have permission to delete this task.',
+                'task-manager'
+            )
+        );
+    }
+
+    $task_id = isset($_POST['tm_task_id'])
+        ? absint(wp_unslash($_POST['tm_task_id']))
+        : 0;
+
+    if (!$task_id) {
+        wp_safe_redirect(
+            admin_url('admin.php?page=task-manager&error=invalid-task')
+        );
+        exit;
+    }
+
+    check_admin_referer('tm_delete_task_' . $task_id);
+
+    $task = get_post($task_id);
+
+    if (!$task || 'tm_tasks' !== $task->post_type) {
+        wp_safe_redirect(
+            admin_url('admin.php?page=task-manager&error=task-not-found')
+        );
+        exit;
+    }
+
+    /*
+     * Keep the original soft-delete concept:
+     * mark the task as inactive instead of permanently deleting it.
+     */
+    update_post_meta(
+        $task_id,
+        'tm_status',
+        'inactive'
+    );
+
+    wp_safe_redirect(
+        admin_url('admin.php?page=task-manager&deleted=1')
+    );
+    exit;
+}
+
+/*
+|--------------------------------------------------------------------------
 | Admin Page
 |--------------------------------------------------------------------------
 */
@@ -198,6 +269,23 @@ function tm_render_admin_page()
         'posts_per_page' => -1,
         'orderby'        => 'ID',
         'order'          => 'DESC',
+
+        /*
+         * Show normal/active tasks only.
+         * Tasks marked inactive by the Delete button are hidden.
+         */
+        'meta_query'     => [
+            'relation' => 'OR',
+            [
+                'key'     => 'tm_status',
+                'compare' => 'NOT EXISTS',
+            ],
+            [
+                'key'     => 'tm_status',
+                'value'   => 'inactive',
+                'compare' => '!=',
+            ],
+        ],
     ]);
     ?>
 
@@ -214,6 +302,12 @@ function tm_render_admin_page()
             <?php if (isset($_GET['updated'])) : ?>
                 <div class="notice notice-success is-dismissible">
                     <p>Task updated successfully.</p>
+                </div>
+            <?php endif; ?>
+
+            <?php if (isset($_GET['deleted'])) : ?>
+                <div class="notice notice-error is-dismissible">
+                    <p>Task deleted successfully.</p>
                 </div>
             <?php endif; ?>
 
@@ -259,25 +353,16 @@ function tm_render_admin_page()
                                 <td><?php echo esc_html($index + 1); ?></td>
                                 <td><?php echo esc_html($task->post_title); ?></td>
                                 <td><?php echo esc_html($status); ?></td>
-                                <td>
-                                    <button
-                                        type="button"
-                                        class="tm-btn tm-btn-primary tm-edit-btn"
-                                        data-id="<?php echo esc_attr($task->ID); ?>"
-                                        data-title="<?php echo esc_attr($task->post_title); ?>"
-                                        data-status="<?php echo esc_attr($status); ?>"
-                                    >
+                                <td style="display: flex; gap: 5px;">
+                                    <button type="button" class="tm-btn tm-btn-primary tm-edit-btn" data-id="<?php echo esc_attr($task->ID); ?>" data-title="<?php echo esc_attr($task->post_title); ?>" data-status="<?php echo esc_attr($status); ?>">
                                         Edit
                                     </button>
-
-                                    <button
-                                        type="button"
-                                        class="tm-btn tm-btn-danger tm-delete-btn"
-                                        data-id="<?php echo esc_attr($task->ID); ?>"
-                                        data-title="<?php echo esc_attr($task->post_title); ?>"
-                                    >
-                                        Delete
-                                    </button>
+                                    <form method="POST" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" class="tm-delete-form" data-title="<?php echo esc_attr($task->post_title); ?>">
+                                        <?php wp_nonce_field('tm_delete_task_' . $task->ID); ?>
+                                        <input type="hidden" name="action" value="tm_delete_task">
+                                        <input type="hidden" name="tm_task_id" value="<?php echo esc_attr($task->ID); ?>">
+                                        <button type="submit" class="tm-btn tm-btn-danger tm-delete-btn">Delete</button>
+                                    </form>
                                 </td>
                             </tr>
                         <?php endforeach; ?>
@@ -288,63 +373,30 @@ function tm_render_admin_page()
 
         <div id="tm-modal" class="tm-modal" aria-hidden="true">
             <div class="tm-modal-backdrop" data-close></div>
-
-            <div
-                class="tm-modal-dialog"
-                role="dialog"
-                aria-modal="true"
-                aria-labelledby="tm-modal-title"
-            >
+            <div class="tm-modal-dialog" role="dialog" aria-modal="true" aria-labelledby="tm-modal-title">
                 <div class="tm-modal-header">
                     <h2 id="tm-modal-title">Add New Task</h2>
-
-                    <button
-                        type="button"
-                        class="tm-modal-close"
-                        data-close
-                        aria-label="Close"
-                    >
+                    <button type="button"class="tm-modal-close" data-close aria-label="Close">
                         &times;
                     </button>
                 </div>
 
-                <form
-                    method="post"
-                    action="<?php echo esc_url(admin_url('admin-post.php')); ?>"
-                    id="tm-form"
-                    class="tm-form"
-                >
+                <form method="POST" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" id="tm-form" class="tm-form">
                     <?php wp_nonce_field('tm_save_task'); ?>
-
                     <input type="hidden" name="action" value="tm_save_task">
                     <input type="hidden" name="tm_task_id" id="tm-task-id" value="">
-
                     <label class="tm-label" for="tm-title">Title</label>
-                    <input
-                        type="text"
-                        name="tm_title"
-                        id="tm-title"
-                        class="tm-input"
-                        maxlength="120"
-                        required
-                    >
-
+                    <input type="text" name="tm_title" id="tm-title" class="tm-input" maxlength="120" required>
                     <label class="tm-label" for="tm-status">Status</label>
                     <select name="_tm_status" id="tm-status" class="tm-input">
                         <option value="Pending">Pending</option>
                         <option value="Completed">Completed</option>
                     </select>
-
                     <div class="tm-modal-footer">
                         <button type="button" class="tm-btn" data-close>
                             Cancel
                         </button>
-
-                        <button
-                            type="submit"
-                            id="tm-submit-btn"
-                            class="tm-btn tm-btn-primary"
-                        >
+                        <button type="submit" id="tm-submit-btn" class="tm-btn tm-btn-primary">
                             Save Task
                         </button>
                     </div>
